@@ -19,6 +19,7 @@ interface ConceptHistoryItem extends GenerateImageResponse {
 const SAMPLE_PLACEHOLDER =
   "https://www.zillow.com/homedetails/123-Main-St-Anytown-USA/12345678_zpid/";
 const MAX_UPLOADS = 8;
+const BLOCKED_IMPORT_MESSAGE = "blocked automated access";
 
 const MODE_OPTIONS: Array<{
   id: GenerationMode;
@@ -106,6 +107,33 @@ async function normalizeUploadedImage(file: File) {
   return canvas.toDataURL("image/jpeg", 0.9);
 }
 
+function formatListingTitleFromUrl(input: string) {
+  try {
+    const url = new URL(input);
+    const parts = url.pathname
+      .split("/")
+      .filter(Boolean)
+      .filter((part) => part !== "homedetails");
+    const listingSlug = parts.find((part) => !part.endsWith("_zpid")) ?? "";
+    const cleaned = listingSlug.replace(/-/g, " ").trim();
+
+    return cleaned ? cleaned : "Manual listing import";
+  } catch {
+    return "Manual listing import";
+  }
+}
+
+function createManualListingWorkspace(inputUrl: string, warning: string): ListingImportResult {
+  return {
+    title: formatListingTitleFromUrl(inputUrl),
+    subtitle:
+      "Automated import was blocked for this listing. Add screenshots, drag room photos in, or paste an image from your clipboard to continue.",
+    sourceUrl: inputUrl,
+    images: [],
+    warnings: [warning],
+  };
+}
+
 export function RevivioStudio() {
   const [listingUrl, setListingUrl] = useState("");
   const [listing, setListing] = useState<ListingImportResult | null>(null);
@@ -142,54 +170,125 @@ export function RevivioStudio() {
         setSelectedImageId(payload.images[0]?.id ?? null);
         setConcepts([]);
       } catch (error) {
+        const message = getErrorMessage(error);
+
+        if (message.toLowerCase().includes(BLOCKED_IMPORT_MESSAGE)) {
+          const fallbackListing = createManualListingWorkspace(listingUrl, message);
+          setListing(fallbackListing);
+          setSelectedImageId(null);
+          setConcepts([]);
+          setListingError(null);
+          return;
+        }
+
         setListing(null);
         setSelectedImageId(null);
-        setListingError(getErrorMessage(error));
+        setListingError(message);
       }
     });
   }
 
+  function appendManualImages(files: File[]) {
+    const limitedFiles = files.slice(0, MAX_UPLOADS);
+
+    if (limitedFiles.length === 0) {
+      return Promise.resolve();
+    }
+
+    const baseListing =
+      listing ?? createManualListingWorkspace(listingUrl, "Room images were added manually.");
+
+    setListingError(null);
+    setGenerationError(null);
+
+    return Promise.all(
+      limitedFiles.map(async (file) => {
+        const normalizedDataUrl = await normalizeUploadedImage(file);
+
+        return {
+          id: createId("upload"),
+          url: normalizedDataUrl,
+          dataUrl: normalizedDataUrl,
+          source: file.name,
+        };
+      }),
+    ).then((images) => {
+      const nextImages = [...baseListing.images, ...images].slice(0, MAX_UPLOADS);
+
+      setListing({
+        ...baseListing,
+        title:
+          baseListing.images.length > 0 || baseListing.sourceUrl
+            ? baseListing.title
+            : "Uploaded room photos",
+        subtitle:
+          baseListing.images.length > 0 || baseListing.sourceUrl
+            ? baseListing.subtitle
+            : "Use listing screenshots or saved room photos when the original property site blocks automated access.",
+        images: nextImages,
+        warnings: Array.from(
+          new Set([
+            ...baseListing.warnings,
+            "You can keep adding room screenshots manually if automated listing import is unavailable.",
+          ]),
+        ),
+      });
+
+      setSelectedImageId((current) => current ?? images[0]?.id ?? null);
+      setConcepts([]);
+    });
+  }
+
   function handleManualUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []).slice(0, MAX_UPLOADS);
+    const files = Array.from(event.target.files ?? []);
+
+    startUploadTransition(async () => {
+      try {
+        await appendManualImages(files);
+      } catch (error) {
+        setListingError(getErrorMessage(error));
+      } finally {
+        event.target.value = "";
+      }
+    });
+  }
+
+  function handleManualPaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
 
     if (files.length === 0) {
       return;
     }
 
-    setListingError(null);
-    setGenerationError(null);
+    event.preventDefault();
 
     startUploadTransition(async () => {
       try {
-        const images = await Promise.all(
-          files.map(async (file) => {
-            const normalizedDataUrl = await normalizeUploadedImage(file);
-
-            return {
-              id: createId("upload"),
-              url: normalizedDataUrl,
-              dataUrl: normalizedDataUrl,
-              source: file.name,
-            };
-          }),
-        );
-
-        setListing({
-          title: "Uploaded room photos",
-          subtitle:
-            "Use listing screenshots or saved room photos when the original property site blocks automated access.",
-          sourceUrl: "",
-          images,
-          warnings: [
-            "These room images came from manual uploads instead of automated listing import.",
-          ],
-        });
-        setSelectedImageId(images[0]?.id ?? null);
-        setConcepts([]);
+        await appendManualImages(files);
       } catch (error) {
         setListingError(getErrorMessage(error));
-      } finally {
-        event.target.value = "";
+      }
+    });
+  }
+
+  function handleManualDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+
+    if (files.length === 0) {
+      return;
+    }
+
+    startUploadTransition(async () => {
+      try {
+        await appendManualImages(files);
+      } catch (error) {
+        setListingError(getErrorMessage(error));
       }
     });
   }
@@ -278,11 +377,16 @@ export function RevivioStudio() {
               <h2 className="section-title">Import Listing</h2>
               <p className="section-text">
                 Start with a Zillow listing when it works, then fall back to uploaded room
-                screenshots whenever the source site blocks automated access.
+                screenshots or pasted images whenever the source site blocks automated
+                access.
               </p>
             </div>
             <span className="status-chip">
-              {listing ? `${listing.images.length} photo${listing.images.length === 1 ? "" : "s"}` : "Waiting for URL"}
+              {listing
+                ? listing.images.length > 0
+                  ? `${listing.images.length} photo${listing.images.length === 1 ? "" : "s"}`
+                  : "Manual import needed"
+                : "Waiting for URL"}
             </span>
           </div>
 
@@ -319,7 +423,8 @@ export function RevivioStudio() {
 
             <div className="message message-info">
               If the listing blocks automated access, upload one or more saved listing
-              screenshots or room photos instead.
+              screenshots, drag room photos in, or click the area below and paste a
+              screenshot directly from your clipboard.
             </div>
 
             <label className="label">
@@ -336,6 +441,22 @@ export function RevivioStudio() {
                 browser and use them exactly like imported listing images.
               </p>
             </label>
+
+            <div
+              className="paste-zone"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={handleManualDrop}
+              onPaste={handleManualPaste}
+              tabIndex={0}
+              role="button"
+              aria-label="Paste or drop room screenshots"
+            >
+              <strong>Paste or drop room screenshots here</strong>
+              <span>
+                Click this area, then press <code>Cmd</code> + <code>V</code> after taking
+                a screenshot, or drag image files directly onto it.
+              </span>
+            </div>
 
             {listingError ? <div className="message message-error">{listingError}</div> : null}
 
@@ -373,26 +494,33 @@ export function RevivioStudio() {
                   )}
                 </div>
 
-                <div className="gallery-grid">
-                  {listing.images.map((image, index) => (
-                    <button
-                      key={image.id}
-                      className={`gallery-button ${image.id === selectedImageId ? "is-active" : ""}`}
-                      type="button"
-                      onClick={() => setSelectedImageId(image.id)}
-                    >
-                      <img
-                        className="gallery-image"
-                        src={image.url}
-                        alt={`Imported listing room ${index + 1}`}
-                        loading="lazy"
-                      />
-                      <div className="gallery-caption">
-                        Photo {index + 1} · {image.source}
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                {listing.images.length === 0 ? (
+                  <div className="empty-gallery">
+                    No room images have been added yet. Upload, paste, or drag in one or
+                    more room screenshots to keep going with this listing.
+                  </div>
+                ) : (
+                  <div className="gallery-grid">
+                    {listing.images.map((image, index) => (
+                      <button
+                        key={image.id}
+                        className={`gallery-button ${image.id === selectedImageId ? "is-active" : ""}`}
+                        type="button"
+                        onClick={() => setSelectedImageId(image.id)}
+                      >
+                        <img
+                          className="gallery-image"
+                          src={image.url}
+                          alt={`Imported listing room ${index + 1}`}
+                          loading="lazy"
+                        />
+                        <div className="gallery-caption">
+                          Photo {index + 1} · {image.source}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </article>
             </div>
           ) : null}
