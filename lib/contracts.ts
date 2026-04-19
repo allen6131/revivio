@@ -4,6 +4,7 @@ export interface ListingImage {
   id: string;
   url: string;
   source: string;
+  dataUrl?: string;
 }
 
 export interface ListingImportResult {
@@ -15,7 +16,8 @@ export interface ListingImportResult {
 }
 
 export interface GenerateImageRequest {
-  sourceImageUrl: string;
+  sourceImageUrl?: string;
+  sourceImageDataUrl?: string;
   sourceUrl?: string;
   listingTitle?: string;
   themeId: string;

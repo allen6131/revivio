@@ -142,7 +142,7 @@ export async function importListingFromUrl(listingUrl: string): Promise<ListingI
   if (!response.ok) {
     throw new Error(
       response.status === 403
-        ? "This listing blocked automated access. Try another public Zillow page."
+        ? "This listing blocked automated access. Upload screenshots or saved room photos instead."
         : `Unable to fetch that listing right now (${response.status}).`,
     );
   }

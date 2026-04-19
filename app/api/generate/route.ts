@@ -9,6 +9,10 @@ import { getErrorMessage } from "@/lib/utils";
 export const runtime = "nodejs";
 
 function imageExtensionFromType(contentType: string) {
+  if (contentType.includes("jpeg") || contentType.includes("jpg")) {
+    return "jpg";
+  }
+
   if (contentType.includes("png")) {
     return "png";
   }
@@ -18,6 +22,26 @@ function imageExtensionFromType(contentType: string) {
   }
 
   return "jpg";
+}
+
+function uploadedDataUrlToFile(sourceImageDataUrl: string) {
+  const match = sourceImageDataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+
+  if (!match) {
+    throw new Error("The uploaded room image was invalid. Please upload it again.");
+  }
+
+  const [, contentType, base64Payload] = match;
+
+  if (!contentType.startsWith("image/")) {
+    throw new Error("Only image uploads are supported for manual room imports.");
+  }
+
+  const imageBytes = Buffer.from(base64Payload, "base64");
+
+  return toFile(imageBytes, `upload.${imageExtensionFromType(contentType)}`, {
+    type: contentType,
+  });
 }
 
 async function fetchSourceImage(sourceImageUrl: string, sourceUrl?: string) {
@@ -52,11 +76,23 @@ async function fetchSourceImage(sourceImageUrl: string, sourceUrl?: string) {
   });
 }
 
+async function getSourceImageFile(payload: GenerateImageRequest) {
+  if (payload.sourceImageDataUrl?.trim()) {
+    return uploadedDataUrlToFile(payload.sourceImageDataUrl);
+  }
+
+  if (payload.sourceImageUrl?.trim()) {
+    return fetchSourceImage(payload.sourceImageUrl, payload.sourceUrl);
+  }
+
+  throw new Error("Select or upload a room photo before generating a concept.");
+}
+
 export async function POST(request: Request) {
   try {
     const payload = (await request.json()) as GenerateImageRequest;
 
-    if (!payload.sourceImageUrl?.trim()) {
+    if (!payload.sourceImageUrl?.trim() && !payload.sourceImageDataUrl?.trim()) {
       return NextResponse.json(
         { error: "Select a room photo before generating a concept." },
         { status: 400 },
@@ -78,7 +114,7 @@ export async function POST(request: Request) {
       listingTitle: payload.listingTitle,
     });
 
-    const sourceImage = await fetchSourceImage(payload.sourceImageUrl, payload.sourceUrl);
+    const sourceImage = await getSourceImageFile(payload);
     const result = await getOpenAIClient().images.edit({
       model: process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1.5",
       image: sourceImage,

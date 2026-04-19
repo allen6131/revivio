@@ -18,6 +18,7 @@ interface ConceptHistoryItem extends GenerateImageResponse {
 
 const SAMPLE_PLACEHOLDER =
   "https://www.zillow.com/homedetails/123-Main-St-Anytown-USA/12345678_zpid/";
+const MAX_UPLOADS = 8;
 
 const MODE_OPTIONS: Array<{
   id: GenerationMode;
@@ -48,6 +49,63 @@ async function readJson<T>(response: Response) {
   return payload;
 }
 
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error("Unable to read the selected image."));
+    };
+
+    reader.onerror = () => {
+      reject(new Error("Unable to read the selected image."));
+    };
+
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(dataUrl: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Unable to prepare the uploaded image."));
+    image.src = dataUrl;
+  });
+}
+
+async function normalizeUploadedImage(file: File) {
+  const originalDataUrl = await readFileAsDataUrl(file);
+  const image = await loadImage(originalDataUrl);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(image.width, image.height));
+  const targetWidth = Math.max(1, Math.round(image.width * scale));
+  const targetHeight = Math.max(1, Math.round(image.height * scale));
+
+  if (scale === 1 && file.size < 3_500_000) {
+    return originalDataUrl;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    return originalDataUrl;
+  }
+
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+  return canvas.toDataURL("image/jpeg", 0.9);
+}
+
 export function RevivioStudio() {
   const [listingUrl, setListingUrl] = useState("");
   const [listing, setListing] = useState<ListingImportResult | null>(null);
@@ -60,6 +118,7 @@ export function RevivioStudio() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isImportPending, startImportTransition] = useTransition();
   const [isGeneratePending, startGenerateTransition] = useTransition();
+  const [isUploadPending, startUploadTransition] = useTransition();
 
   const selectedImage = listing?.images.find((image) => image.id === selectedImageId) ?? null;
 
@@ -90,6 +149,51 @@ export function RevivioStudio() {
     });
   }
 
+  function handleManualUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []).slice(0, MAX_UPLOADS);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    setListingError(null);
+    setGenerationError(null);
+
+    startUploadTransition(async () => {
+      try {
+        const images = await Promise.all(
+          files.map(async (file) => {
+            const normalizedDataUrl = await normalizeUploadedImage(file);
+
+            return {
+              id: createId("upload"),
+              url: normalizedDataUrl,
+              dataUrl: normalizedDataUrl,
+              source: file.name,
+            };
+          }),
+        );
+
+        setListing({
+          title: "Uploaded room photos",
+          subtitle:
+            "Use listing screenshots or saved room photos when the original property site blocks automated access.",
+          sourceUrl: "",
+          images,
+          warnings: [
+            "These room images came from manual uploads instead of automated listing import.",
+          ],
+        });
+        setSelectedImageId(images[0]?.id ?? null);
+        setConcepts([]);
+      } catch (error) {
+        setListingError(getErrorMessage(error));
+      } finally {
+        event.target.value = "";
+      }
+    });
+  }
+
   function handleGenerate() {
     if (!listing || !selectedImage) {
       return;
@@ -105,7 +209,8 @@ export function RevivioStudio() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            sourceImageUrl: selectedImage.url,
+            sourceImageUrl: selectedImage.dataUrl ? undefined : selectedImage.url,
+            sourceImageDataUrl: selectedImage.dataUrl,
             sourceUrl: listing.sourceUrl,
             listingTitle: listing.title,
             themeId,
@@ -172,8 +277,8 @@ export function RevivioStudio() {
             <div>
               <h2 className="section-title">Import Listing</h2>
               <p className="section-text">
-                Revivio pulls photos directly from the listing page so the user can pick
-                which room to redesign or stage.
+                Start with a Zillow listing when it works, then fall back to uploaded room
+                screenshots whenever the source site blocks automated access.
               </p>
             </div>
             <span className="status-chip">
@@ -212,6 +317,26 @@ export function RevivioStudio() {
               </button>
             </div>
 
+            <div className="message message-info">
+              If the listing blocks automated access, upload one or more saved listing
+              screenshots or room photos instead.
+            </div>
+
+            <label className="label">
+              <span>Manual room image fallback</span>
+              <input
+                className="input"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                multiple
+                onChange={handleManualUpload}
+              />
+              <p className="hint">
+                Upload up to {MAX_UPLOADS} room photos. Revivio will resize them in the
+                browser and use them exactly like imported listing images.
+              </p>
+            </label>
+
             {listingError ? <div className="message message-error">{listingError}</div> : null}
 
             {listing?.warnings.length ? (
@@ -234,9 +359,18 @@ export function RevivioStudio() {
                   {listing.subtitle ? (
                     <p className="listing-subtitle">{listing.subtitle}</p>
                   ) : null}
-                  <a className="listing-subtitle" href={listing.sourceUrl} target="_blank" rel="noreferrer">
-                    Open source listing
-                  </a>
+                  {listing.sourceUrl ? (
+                    <a
+                      className="listing-subtitle"
+                      href={listing.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open source listing
+                    </a>
+                  ) : (
+                    <p className="listing-subtitle">Uploaded directly from your device.</p>
+                  )}
                 </div>
 
                 <div className="gallery-grid">
@@ -324,7 +458,7 @@ export function RevivioStudio() {
             <div className="button-row">
               <button
                 className="button-primary"
-                disabled={!selectedImage || isGeneratePending}
+                disabled={!selectedImage || isGeneratePending || isUploadPending}
                 type="button"
                 onClick={handleGenerate}
               >
@@ -381,11 +515,11 @@ export function RevivioStudio() {
                     <img
                       className="comparison-image"
                       src={concept.sourceImageUrl}
-                      alt="Original listing room"
+                      alt="Source room image"
                     />
                     <figcaption>
-                      <strong>Original photo</strong>
-                      <span>Imported directly from the listing.</span>
+                      <strong>Source room image</strong>
+                      <span>Imported from the listing or uploaded manually.</span>
                     </figcaption>
                   </figure>
 
@@ -433,7 +567,7 @@ export function RevivioStudio() {
 
       <p className="footer-note">
         Add <code>OPENAI_API_KEY</code> in your environment before generating images.
-        The listing import route works without it.
+        The listing import and manual upload fallback both work without it.
       </p>
     </main>
   );

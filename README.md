@@ -1,7 +1,9 @@
 # Revivio
 
 Revivio is a Next.js app that imports room photos from a Zillow listing and turns them
-into realistic redesign or virtual staging concepts with OpenAI image generation.
+into realistic redesign or virtual staging concepts with OpenAI image generation. When
+listing sites block automated access, users can fall back to uploading listing
+screenshots or saved room photos directly.
 
 ## Local development
 
@@ -14,6 +16,7 @@ into realistic redesign or virtual staging concepts with OpenAI image generation
 
 - Paste a public Zillow listing URL
 - Extract photo URLs from the listing page
+- Or upload room screenshots manually when automated import is blocked
 - Select a room photo
 - Choose a theme such as Modern, Contemporary, Japandi, or Coastal
 - Generate either:
